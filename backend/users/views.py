@@ -2,16 +2,20 @@ from rest_framework import generics, viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from django.contrib.auth import get_user_model
+from django.db import models
 from django.core.mail import send_mail
 from django.conf import settings
 
-from .models import Department, ClientProfile
+from .models import Department, ClientProfile, Client, LeaveRequest, Notification
 from .serializers import (
     UserSerializer, RegisterSerializer, UserProfileSerializer,
     UserActivationSerializer, PasswordChangeSerializer, DepartmentSerializer,
     ClientProfileSerializer,
+    ClientDirectorySerializer,
     NotificationSerializer,
+    LeaveRequestSerializer,
 )
 from .permissions import IsAdmin, IsAdminOrManager
 from django.utils import timezone
@@ -94,8 +98,12 @@ class UserViewSet(viewsets.ModelViewSet):
         Managers can view users and activate/deactivate permitted internal accounts.
         All other user-management operations remain admin-only.
         """
-        if self.action in ['list', 'retrieve', 'pending_activation', 'activate', 'deactivate', 'clients']:
+        if self.action == 'technicians':
+            permission_classes = [IsAuthenticated]
+        elif self.action in ['list', 'retrieve', 'pending_activation', 'activate', 'deactivate', 'clients']:
             permission_classes = [IsAuthenticated, IsAdminOrManager]
+        elif self.action == 'client_directory':
+            permission_classes = [IsAuthenticated]
         else:
             permission_classes = [IsAuthenticated, IsAdmin]
         return [permission() for permission in permission_classes]
@@ -197,6 +205,33 @@ class UserViewSet(viewsets.ModelViewSet):
         serializer = ClientProfileSerializer(queryset, many=True)
         return Response(serializer.data)
 
+    @action(detail=False, methods=['get'])
+    def client_directory(self, request):
+        """
+        Search canonical client records for fast job/ticket autofill.
+        Accessible to authenticated users.
+        """
+        query = (request.query_params.get('q') or '').strip()
+        limit = request.query_params.get('limit', 20)
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = 20
+        limit = max(1, min(limit, 100))
+
+        queryset = Client.objects.filter(is_active=True)
+        if query:
+            queryset = queryset.filter(
+                models.Q(full_name__icontains=query)
+                | models.Q(company_name__icontains=query)
+                | models.Q(email__icontains=query)
+                | models.Q(phone__icontains=query)
+            )
+
+        queryset = queryset.order_by('company_name', 'full_name', 'email')[:limit]
+        serializer = ClientDirectorySerializer(queryset, many=True)
+        return Response(serializer.data)
+
 
 class DepartmentViewSet(viewsets.ModelViewSet):
     """
@@ -240,3 +275,125 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
         now = timezone.now()
         self.get_queryset().filter(is_read=False).update(is_read=True, read_at=now)
         return Response({'message': 'All notifications marked as read.'}, status=status.HTTP_200_OK)
+
+
+class LeaveRequestViewSet(viewsets.ModelViewSet):
+    """
+    Leave requests:
+    - Staff users create their own requests.
+    - Managers/Admins can see all and review status.
+    """
+    serializer_class = LeaveRequestSerializer
+    permission_classes = (IsAuthenticated,)
+    filterset_fields = ['status', 'leave_type']
+    search_fields = ['requester__first_name', 'requester__last_name', 'requester__email', 'reason']
+    ordering_fields = ['created_at', 'start_date', 'end_date', 'status']
+    ordering = ['-created_at']
+
+    def get_queryset(self):
+        user = self.request.user
+        queryset = LeaveRequest.objects.select_related('requester', 'reviewed_by').all()
+        if user.role in ['admin', 'manager']:
+            return queryset
+        return queryset.filter(requester=user)
+
+    def perform_create(self, serializer):
+        requester = self.request.user
+        if requester.role == 'user':
+            raise PermissionDenied('Client users cannot submit internal leave requests.')
+
+        leave_request = serializer.save(
+            requester=requester,
+            status='pending',
+            manager_notes='',
+            reviewed_by=None,
+            reviewed_at=None,
+        )
+
+        manager_recipients = User.objects.filter(
+            role='manager',
+            is_active=True,
+            is_activated=True,
+        )
+        if not manager_recipients.exists():
+            manager_recipients = User.objects.filter(
+                role='admin',
+                is_active=True,
+                is_activated=True,
+            )
+
+        notifications = [
+            Notification(
+                recipient=recipient,
+                title='New Leave Request',
+                message=(
+                    f'{requester.get_full_name() or requester.username} submitted '
+                    f'a {leave_request.get_leave_type_display().lower()} request '
+                    f'for {leave_request.start_date} to {leave_request.end_date}.'
+                ),
+                category='system',
+                link='/profile',
+            )
+            for recipient in manager_recipients
+            if recipient.id != requester.id
+        ]
+        if notifications:
+            Notification.objects.bulk_create(notifications)
+
+    def perform_update(self, serializer):
+        user = self.request.user
+        instance = self.get_object()
+
+        if user.role not in ['admin', 'manager']:
+            raise PermissionDenied('Only managers or admins can review leave requests.')
+
+        previous_status = instance.status
+        incoming_status = serializer.validated_data.get('status', instance.status)
+        manager_notes = (serializer.validated_data.get('manager_notes', instance.manager_notes) or '').strip()
+
+        if incoming_status in ['approved', 'rejected'] and not manager_notes:
+            raise ValidationError({'manager_notes': 'Manager comment is required when approving or rejecting leave.'})
+
+        leave_request = serializer.save(manager_notes=manager_notes)
+        if leave_request.status != previous_status and leave_request.status in ['approved', 'rejected', 'cancelled']:
+            leave_request.reviewed_by = user
+            leave_request.reviewed_at = timezone.now()
+            leave_request.save(update_fields=['reviewed_by', 'reviewed_at', 'updated_at'])
+
+            note_suffix = f' Comment: {manager_notes}' if manager_notes else ''
+            Notification.objects.create(
+                recipient=leave_request.requester,
+                title='Leave Request Update',
+                message=(
+                    f'Your leave request ({leave_request.start_date} to {leave_request.end_date}) '
+                    f'was {leave_request.status}.{note_suffix}'
+                ),
+                category='system',
+                link='/profile',
+            )
+
+            # For approved sick leave, notify all internal staff of availability impact
+            # without exposing manager notes/private comments.
+            if leave_request.status == 'approved' and leave_request.leave_type == 'sick':
+                staff_recipients = User.objects.filter(
+                    role__in=['admin', 'manager', 'technician', 'accounts'],
+                    is_active=True,
+                    is_activated=True,
+                ).exclude(id__in=[leave_request.requester_id, user.id])
+
+                requester_name = leave_request.requester.get_full_name() or leave_request.requester.username
+                broadcast_notifications = [
+                    Notification(
+                        recipient=recipient,
+                        title='Staff Availability Notice',
+                        message=(
+                            f'{requester_name} is on approved sick leave '
+                            f'from {leave_request.start_date} to {leave_request.end_date}.'
+                        ),
+                        category='system',
+                        link='/profile',
+                    )
+                    for recipient in staff_recipients
+                ]
+                if broadcast_notifications:
+                    Notification.objects.bulk_create(broadcast_notifications)

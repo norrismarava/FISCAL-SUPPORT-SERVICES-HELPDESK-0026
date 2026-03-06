@@ -1,1 +1,701 @@
-node_modules
+import React, { useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import toast from 'react-hot-toast';
+import {
+  BuildingOffice2Icon,
+  BookOpenIcon,
+  ChatBubbleLeftRightIcon,
+  CheckBadgeIcon,
+  ClockIcon,
+  MegaphoneIcon,
+  PencilSquareIcon,
+  PhoneIcon,
+  TicketIcon,
+  UserCircleIcon,
+  WrenchScrewdriverIcon,
+  ArrowRightOnRectangleIcon,
+  ChevronDownIcon,
+  XMarkIcon,
+} from '@heroicons/react/24/outline';
+import { callLogsAPI, serviceTypesAPI, ticketsAPI } from '../../api/endpoints';
+import { useAuth } from '../../hooks/useAuth';
+
+const asRows = (payload) => {
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload?.results)) return payload.results;
+  return [];
+};
+
+const statusStyles = {
+  open: 'bg-blue-100 text-blue-700',
+  in_progress: 'bg-blue-100 text-blue-700',
+  pending: 'bg-amber-100 text-amber-700',
+  solved: 'bg-emerald-100 text-emerald-700',
+  closed: 'bg-slate-100 text-slate-700',
+  reopened: 'bg-violet-100 text-violet-700',
+};
+
+const NavButton = ({ active, icon: Icon, label, onClick }) => (
+  <button
+    type="button"
+    onClick={onClick}
+    className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm font-semibold transition ${
+      active
+        ? 'bg-indigo-50 text-indigo-700'
+        : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+    }`}
+  >
+    <Icon className="h-4 w-4 shrink-0" />
+    <span>{label}</span>
+  </button>
+);
+
+const Field = ({
+  label,
+  value,
+  onChange,
+  type = 'text',
+  required = false,
+  disabled = false,
+  placeholder = '',
+}) => (
+  <label className="block">
+    <span className="mb-1 block text-sm font-semibold text-slate-700">
+      {label}
+      {required ? ' *' : ''}
+    </span>
+    <input
+      type={type}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      disabled={disabled}
+      placeholder={placeholder}
+      className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 disabled:bg-slate-100 disabled:text-slate-500"
+    />
+  </label>
+);
+
+const SelectField = ({ label, value, onChange, options, required = false }) => (
+  <label className="block">
+    <span className="mb-1 block text-sm font-semibold text-slate-700">
+      {label}
+      {required ? ' *' : ''}
+    </span>
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
+    >
+      <option value="">Select...</option>
+      {options.map((opt) => (
+        <option key={opt.value || opt} value={opt.value || opt}>
+          {opt.label || opt}
+        </option>
+      ))}
+    </select>
+  </label>
+);
+
+const TicketRow = ({ ticket }) => {
+  const statusKey = ticket.status || 'open';
+  const statusClass = statusStyles[statusKey] || 'bg-slate-100 text-slate-700';
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white p-4 hover:shadow-sm">
+      <div className="mb-1 flex items-center gap-2">
+        <span className="text-xs font-bold text-slate-500">{ticket.ticket_number || `FSS-${ticket.id}`}</span>
+        <span className={`rounded-md px-2 py-0.5 text-xs font-semibold ${statusClass}`}>
+          {String(statusKey).replace('_', ' ')}
+        </span>
+      </div>
+      <p className="text-sm font-semibold text-slate-900">{ticket.subject || 'Support request'}</p>
+      <p className="text-xs text-slate-500">{ticket.company_name || '-'}</p>
+    </div>
+  );
+};
+
+const ProfilePanel = ({
+  user,
+  profileDraft,
+  setProfileDraft,
+  avatarPreview,
+  onAvatarPick,
+  onSaveProfile,
+  savingProfile,
+  passwordForm,
+  setPasswordForm,
+  onUpdatePassword,
+  updatingPassword,
+}) => (
+  <div className="space-y-5">
+    <div className="rounded-2xl border border-slate-200 bg-white p-5">
+      <h2 className="text-2xl font-bold text-slate-900">My Profile</h2>
+      <p className="mt-1 text-sm text-slate-500">Update your personal details and avatar.</p>
+    </div>
+
+    <div className="rounded-2xl border border-slate-200 bg-white p-5">
+      <div className="mb-5 flex items-center gap-4">
+        <div className="h-16 w-16 overflow-hidden rounded-xl bg-slate-200">
+          {avatarPreview ? (
+            <img src={avatarPreview} alt="avatar" className="h-full w-full object-cover" />
+          ) : (
+            <div className="grid h-full w-full place-items-center bg-gradient-to-br from-indigo-500 to-violet-500 text-lg font-bold text-white">
+              {(user?.first_name?.[0] || 'C').toUpperCase()}
+              {(user?.last_name?.[0] || 'U').toUpperCase()}
+            </div>
+          )}
+        </div>
+        <div>
+          <p className="text-sm font-semibold text-slate-900">
+            {user?.first_name || 'Client'} {user?.last_name || 'User'}
+          </p>
+          <p className="text-xs text-slate-500">{user?.email || '-'}</p>
+          <input type="file" accept="image/*" onChange={onAvatarPick} className="mt-2 text-xs" />
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+        <Field
+          label="First Name"
+          value={profileDraft.first_name}
+          onChange={(v) => setProfileDraft((p) => ({ ...p, first_name: v }))}
+          required
+        />
+        <Field
+          label="Last Name"
+          value={profileDraft.last_name}
+          onChange={(v) => setProfileDraft((p) => ({ ...p, last_name: v }))}
+          required
+        />
+        <Field label="Email" value={user?.email || ''} onChange={() => {}} disabled />
+        <Field
+          label="Phone"
+          value={profileDraft.phone}
+          onChange={(v) => setProfileDraft((p) => ({ ...p, phone: v }))}
+        />
+        <div className="md:col-span-2">
+          <label className="block">
+            <span className="mb-1 block text-sm font-semibold text-slate-700">Address</span>
+            <textarea
+              value={profileDraft.address}
+              onChange={(e) => setProfileDraft((p) => ({ ...p, address: e.target.value }))}
+              className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
+              rows={3}
+            />
+          </label>
+        </div>
+      </div>
+
+      <div className="mt-4 flex justify-end">
+        <button
+          type="button"
+          disabled={savingProfile}
+          onClick={onSaveProfile}
+          className="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-bold text-white hover:bg-indigo-700 disabled:opacity-60"
+        >
+          {savingProfile ? 'Saving...' : 'Save Profile'}
+        </button>
+      </div>
+    </div>
+
+    <div className="rounded-2xl border border-slate-200 bg-white p-5">
+      <h3 className="text-lg font-bold text-slate-900">Change Password</h3>
+      <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+        <Field
+          label="Current Password"
+          type="password"
+          value={passwordForm.old_password}
+          onChange={(v) => setPasswordForm((p) => ({ ...p, old_password: v }))}
+        />
+        <div />
+        <Field
+          label="New Password"
+          type="password"
+          value={passwordForm.new_password}
+          onChange={(v) => setPasswordForm((p) => ({ ...p, new_password: v }))}
+        />
+        <Field
+          label="Confirm Password"
+          type="password"
+          value={passwordForm.new_password2}
+          onChange={(v) => setPasswordForm((p) => ({ ...p, new_password2: v }))}
+        />
+      </div>
+      <div className="mt-4 flex justify-end">
+        <button
+          type="button"
+          disabled={updatingPassword}
+          onClick={onUpdatePassword}
+          className="rounded-xl bg-rose-600 px-4 py-2 text-sm font-bold text-white hover:bg-rose-700 disabled:opacity-60"
+        >
+          {updatingPassword ? 'Updating...' : 'Update Password'}
+        </button>
+      </div>
+    </div>
+  </div>
+);
+
+function CustomerPortal() {
+  const { user, updateProfile, changePassword, logout } = useAuth();
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+
+  const [page, setPage] = useState('dashboard');
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [showUserMenu, setShowUserMenu] = useState(false);
+  const [showTicketModal, setShowTicketModal] = useState(false);
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [now, setNow] = useState(new Date());
+
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [updatingPassword, setUpdatingPassword] = useState(false);
+
+  const [profileDraft, setProfileDraft] = useState({
+    first_name: '',
+    last_name: '',
+    phone: '',
+    address: '',
+  });
+  const [avatarFile, setAvatarFile] = useState(null);
+  const [avatarPreview, setAvatarPreview] = useState('');
+
+  const [passwordForm, setPasswordForm] = useState({
+    old_password: '',
+    new_password: '',
+    new_password2: '',
+  });
+
+  const [ticketForm, setTicketForm] = useState({
+    company_name: '',
+    email: '',
+    phone: '',
+    contact_person: '',
+    address: '',
+    service_type: '',
+    priority: 'medium',
+    subject: '',
+    message: '',
+  });
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    const fullName = `${user.first_name || ''} ${user.last_name || ''}`.trim();
+    setProfileDraft({
+      first_name: user.first_name || '',
+      last_name: user.last_name || '',
+      phone: user.phone || '',
+      address: user.address || '',
+    });
+    setAvatarPreview(user.avatar || '');
+    setTicketForm((prev) => ({
+      ...prev,
+      company_name: user.company_name || fullName || '',
+      email: user.email || '',
+      phone: user.phone || '',
+      contact_person: fullName,
+      address: user.address || '',
+    }));
+  }, [user]);
+
+  const { data: ticketData } = useQuery({
+    queryKey: ['portal-client-tickets'],
+    queryFn: () => ticketsAPI.clientHistory({ page_size: 50 }),
+  });
+  const { data: jobData } = useQuery({
+    queryKey: ['portal-client-jobs'],
+    queryFn: () => callLogsAPI.customerJobs({ page_size: 50 }),
+  });
+  const { data: serviceTypeData } = useQuery({
+    queryKey: ['portal-service-types'],
+    queryFn: () => serviceTypesAPI.getAll(),
+  });
+
+  const tickets = asRows(ticketData?.data);
+  const jobs = asRows(jobData?.data);
+  const serviceTypes = asRows(serviceTypeData?.data);
+
+  const filteredTickets = useMemo(() => {
+    if (statusFilter === 'all') return tickets;
+    return tickets.filter((t) => t.status === statusFilter);
+  }, [statusFilter, tickets]);
+
+  const stats = useMemo(() => {
+    const openCount = tickets.filter((t) =>
+      ['open', 'in_progress', 'reopened'].includes(t.status)
+    ).length;
+    const solvedCount = tickets.filter((t) =>
+      ['solved', 'closed'].includes(t.status)
+    ).length;
+    const pendingCount = tickets.filter((t) => t.status === 'pending').length;
+    return [
+      { label: 'Open Tickets', value: openCount, icon: TicketIcon, tone: 'text-blue-600 bg-blue-50' },
+      { label: 'Resolved', value: solvedCount, icon: CheckBadgeIcon, tone: 'text-emerald-600 bg-emerald-50' },
+      { label: 'Pending', value: pendingCount, icon: ClockIcon, tone: 'text-amber-600 bg-amber-50' },
+      { label: 'My Jobs', value: jobs.length, icon: WrenchScrewdriverIcon, tone: 'text-violet-600 bg-violet-50' },
+    ];
+  }, [jobs.length, tickets]);
+
+  const navItems = [
+    { id: 'dashboard', label: 'Dashboard', icon: BuildingOffice2Icon },
+    { id: 'tickets', label: 'My Tickets', icon: TicketIcon },
+    { id: 'request', label: 'Submit Request', icon: PencilSquareIcon, action: () => setShowTicketModal(true) },
+    { id: 'profile', label: 'My Profile', icon: UserCircleIcon },
+    { id: 'announcements', label: 'Announcements', icon: MegaphoneIcon },
+  ];
+
+  const handleAvatarPick = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setAvatarFile(file);
+    const reader = new FileReader();
+    reader.onload = (evt) => setAvatarPreview(String(evt.target?.result || ''));
+    reader.readAsDataURL(file);
+  };
+
+  const handleSaveProfile = async () => {
+    setSavingProfile(true);
+    const payload = new FormData();
+    payload.append('first_name', profileDraft.first_name || '');
+    payload.append('last_name', profileDraft.last_name || '');
+    payload.append('phone', profileDraft.phone || '');
+    payload.append('address', profileDraft.address || '');
+    if (avatarFile) payload.append('avatar', avatarFile);
+
+    const result = await updateProfile(payload);
+    setSavingProfile(false);
+    if (result.success) {
+      toast.success('Profile updated successfully');
+      setAvatarFile(null);
+      return;
+    }
+    toast.error('Profile update failed');
+  };
+
+  const handleUpdatePassword = async () => {
+    if (!passwordForm.old_password || !passwordForm.new_password || !passwordForm.new_password2) {
+      toast.error('Please fill all password fields');
+      return;
+    }
+    if (passwordForm.new_password !== passwordForm.new_password2) {
+      toast.error('New passwords do not match');
+      return;
+    }
+    setUpdatingPassword(true);
+    const result = await changePassword(passwordForm);
+    setUpdatingPassword(false);
+    if (result.success) {
+      toast.success('Password updated');
+      setPasswordForm({ old_password: '', new_password: '', new_password2: '' });
+      return;
+    }
+    toast.error('Password update failed');
+  };
+
+  const handleSubmitTicket = async () => {
+    if (!ticketForm.company_name || !ticketForm.email || !ticketForm.service_type || !ticketForm.message) {
+      toast.error('Please fill required fields');
+      return;
+    }
+    try {
+      await ticketsAPI.create(ticketForm);
+      toast.success('Ticket submitted');
+      setShowTicketModal(false);
+      await queryClient.invalidateQueries({ queryKey: ['portal-client-tickets'] });
+      setTicketForm((prev) => ({
+        ...prev,
+        subject: '',
+        message: '',
+        service_type: '',
+        priority: 'medium',
+      }));
+    } catch {
+      toast.error('Ticket submission failed');
+    }
+  };
+
+  const initials = `${user?.first_name?.[0] || 'C'}${user?.last_name?.[0] || 'L'}`.toUpperCase();
+
+  return (
+    <div className="min-h-screen bg-slate-100">
+      <div className="flex min-h-screen">
+        <aside className={`fixed inset-y-0 left-0 z-30 w-[260px] border-r border-slate-200 bg-white px-4 py-5 shadow-sm transition-transform lg:static lg:translate-x-0 ${mobileNavOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+          <div className="mb-6 flex items-center gap-2 px-1">
+            <div className="rounded-xl bg-gradient-to-br from-indigo-600 to-violet-600 p-2">
+              <BuildingOffice2Icon className="h-5 w-5 text-white" />
+            </div>
+            <div>
+              <p className="text-sm font-bold text-slate-900">FSS Portal</p>
+              <p className="text-xs text-slate-500">Client Access</p>
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            {navItems.map((item) => (
+              <NavButton
+                key={item.id}
+                active={page === item.id}
+                icon={item.icon}
+                label={item.label}
+                onClick={() => {
+                  setMobileNavOpen(false);
+                  if (item.action) item.action();
+                  else setPage(item.id);
+                }}
+              />
+            ))}
+          </div>
+
+          <div className="mt-5 border-t border-slate-100 pt-4">
+            <a href="/faq" className="mb-1 flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100"><BookOpenIcon className="h-4 w-4" /> Knowledge Base</a>
+            <a href="mailto:support@fiscalsupportservices.com" className="mb-1 flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100"><ChatBubbleLeftRightIcon className="h-4 w-4" /> Live Chat</a>
+            <a href="tel:+263770000000" className="flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100"><PhoneIcon className="h-4 w-4" /> Contact Us</a>
+          </div>
+
+          <div className="relative mt-5 border-t border-slate-100 pt-3">
+            {showUserMenu ? (
+              <div className="absolute bottom-14 left-0 right-0 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-lg">
+                <button type="button" onClick={() => { setPage('profile'); setShowUserMenu(false); }} className="w-full px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50">View Profile</button>
+                <button type="button" onClick={() => { logout(); navigate('/login'); }} className="flex w-full items-center gap-2 bg-rose-50 px-3 py-2 text-left text-sm font-semibold text-rose-700 hover:bg-rose-100">
+                  <ArrowRightOnRectangleIcon className="h-4 w-4" /> Sign out
+                </button>
+              </div>
+            ) : null}
+            <button type="button" onClick={() => setShowUserMenu((s) => !s)} className="flex w-full items-center gap-2 rounded-xl px-2 py-2 hover:bg-slate-100">
+              <div className="grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-amber-500 to-orange-600 text-xs font-bold text-white">{initials}</div>
+              <div className="flex-1 text-left">
+                <p className="text-sm font-semibold text-slate-900">{user?.first_name || 'Client'} {user?.last_name || 'User'}</p>
+                <p className="text-xs text-slate-500">Client Account</p>
+              </div>
+              <ChevronDownIcon className="h-4 w-4 text-slate-400" />
+            </button>
+          </div>
+        </aside>
+
+        <main className="flex-1 p-4 lg:p-8">
+          <div className="mb-4 flex items-center justify-between lg:hidden">
+            <button type="button" onClick={() => setMobileNavOpen((v) => !v)} className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-semibold text-slate-700">
+              Menu
+            </button>
+          </div>
+
+          {page === 'dashboard' && (
+            <div className="space-y-5">
+              <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                <div>
+                  <p className="text-sm font-medium text-slate-500">{now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}</p>
+                  <h1 className="text-2xl font-extrabold text-slate-900 md:text-3xl">
+                    Good {now.getHours() < 12 ? 'morning' : now.getHours() < 17 ? 'afternoon' : 'evening'},{' '}
+                    <span className="bg-gradient-to-r from-indigo-600 to-violet-600 bg-clip-text text-transparent">{user?.first_name || 'Client'}</span>
+                  </h1>
+                  <p className="text-slate-600">Here is a summary of your support activity.</p>
+                </div>
+                <button type="button" onClick={() => setShowTicketModal(true)} className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-bold text-white hover:bg-indigo-700">
+                  <PencilSquareIcon className="h-4 w-4" /> New Ticket
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+                {stats.map((s) => {
+                  const Icon = s.icon;
+                  return (
+                    <div key={s.label} className="rounded-2xl border border-slate-200 bg-white p-4">
+                      <p className="text-xs font-semibold text-slate-500">{s.label}</p>
+                      <div className="mt-2 flex items-center justify-between">
+                        <p className="text-3xl font-extrabold text-slate-900">{s.value}</p>
+                        <span className={`rounded-xl p-2 ${s.tone}`}>
+                          <Icon className="h-5 w-5" />
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="grid grid-cols-1 gap-5 xl:grid-cols-[1fr_320px]">
+                <div className="space-y-4">
+                  <div className="rounded-2xl bg-gradient-to-r from-indigo-600 via-violet-600 to-purple-600 p-6 text-white">
+                    <p className="text-xs font-bold uppercase tracking-[0.12em] text-white/75">Need Help?</p>
+                    <p className="mt-1 text-2xl font-bold">We are here to support you</p>
+                    <p className="mt-1 text-sm text-white/85">Submit a ticket and our team will respond quickly.</p>
+                    <button type="button" onClick={() => setShowTicketModal(true)} className="mt-4 rounded-xl bg-white px-4 py-2 text-sm font-bold text-indigo-700 hover:bg-slate-100">
+                      Submit a Request
+                    </button>
+                  </div>
+
+                  <div className="rounded-2xl border border-slate-200 bg-white">
+                    <div className="flex flex-col gap-3 border-b border-slate-100 px-5 py-4 md:flex-row md:items-center md:justify-between">
+                      <div>
+                        <p className="font-bold text-slate-900">My Support Tickets</p>
+                        <p className="text-xs text-slate-500">{tickets.length} total tickets</p>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {['all', 'in_progress', 'pending', 'solved', 'closed'].map((v) => (
+                          <button
+                            key={v}
+                            type="button"
+                            onClick={() => setStatusFilter(v)}
+                            className={`rounded-lg px-3 py-1 text-xs font-bold ${
+                              statusFilter === v
+                                ? 'bg-indigo-600 text-white'
+                                : 'bg-slate-100 text-slate-700'
+                            }`}
+                          >
+                            {v === 'all' ? 'All' : v.replace('_', ' ')}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="space-y-2 p-4">
+                      {filteredTickets.slice(0, 8).map((t) => <TicketRow key={t.id} ticket={t} />)}
+                      {filteredTickets.length === 0 && (
+                        <p className="text-sm text-slate-500">No tickets found.</p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                    <p className="mb-2 font-bold text-slate-900">Quick Actions</p>
+                    <div className="space-y-2">
+                      <button type="button" onClick={() => setShowTicketModal(true)} className="w-full rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-2 text-left text-sm font-semibold text-slate-800">
+                        New Support Ticket
+                      </button>
+                      <button type="button" onClick={() => setPage('tickets')} className="w-full rounded-xl border border-violet-200 bg-violet-50 px-3 py-2 text-left text-sm font-semibold text-slate-800">
+                        View Ticket History
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                    <p className="mb-2 font-bold text-slate-900">Announcements</p>
+                    <div className="space-y-2">
+                      <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+                        Scheduled Maintenance - March 10
+                      </div>
+                      <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+                        Real-time Ticket Tracking enabled
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {page === 'tickets' && (
+            <div className="rounded-2xl border border-slate-200 bg-white p-4">
+              <h2 className="text-2xl font-bold text-slate-900">My Tickets</h2>
+              <p className="mb-3 text-sm text-slate-500">{tickets.length} records</p>
+              <div className="space-y-2">
+                {tickets.map((t) => <TicketRow key={t.id} ticket={t} />)}
+                {tickets.length === 0 && <p className="text-sm text-slate-500">No tickets yet.</p>}
+              </div>
+            </div>
+          )}
+
+          {page === 'announcements' && (
+            <div className="rounded-2xl border border-slate-200 bg-white p-4">
+              <h2 className="text-2xl font-bold text-slate-900">Announcements</h2>
+              <div className="mt-3 space-y-2">
+                {[
+                  'Scheduled maintenance this weekend.',
+                  'Portal updates now live.',
+                ].map((txt) => (
+                  <div key={txt} className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+                    {txt}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {page === 'profile' && (
+            <ProfilePanel
+              user={user}
+              profileDraft={profileDraft}
+              setProfileDraft={setProfileDraft}
+              avatarPreview={avatarPreview}
+              onAvatarPick={handleAvatarPick}
+              onSaveProfile={handleSaveProfile}
+              savingProfile={savingProfile}
+              passwordForm={passwordForm}
+              setPasswordForm={setPasswordForm}
+              onUpdatePassword={handleUpdatePassword}
+              updatingPassword={updatingPassword}
+            />
+          )}
+        </main>
+      </div>
+
+      {showTicketModal && (
+        <div className="fixed inset-0 z-[100] grid place-items-center bg-slate-900/50 p-4">
+          <div className="w-full max-w-3xl rounded-2xl border border-slate-200 bg-white p-5">
+            <div className="mb-4 flex items-start justify-between">
+              <div>
+                <h3 className="text-xl font-bold text-slate-900">Submit Support Request</h3>
+                <p className="text-sm text-slate-500">Fill details below and submit your ticket.</p>
+              </div>
+              <button type="button" onClick={() => setShowTicketModal(false)} className="rounded-lg bg-slate-100 p-1.5 text-slate-600 hover:bg-slate-200">
+                <XMarkIcon className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              <Field label="Company Name" value={ticketForm.company_name} onChange={(v) => setTicketForm((p) => ({ ...p, company_name: v }))} required />
+              <Field label="Email" type="email" value={ticketForm.email} onChange={(v) => setTicketForm((p) => ({ ...p, email: v }))} required />
+              <Field label="Phone" value={ticketForm.phone} onChange={(v) => setTicketForm((p) => ({ ...p, phone: v }))} />
+              <Field label="Contact Person" value={ticketForm.contact_person} onChange={(v) => setTicketForm((p) => ({ ...p, contact_person: v }))} />
+              <div className="md:col-span-2">
+                <Field label="Address" value={ticketForm.address} onChange={(v) => setTicketForm((p) => ({ ...p, address: v }))} />
+              </div>
+              <SelectField
+                label="Service Type"
+                value={ticketForm.service_type}
+                onChange={(v) => setTicketForm((p) => ({ ...p, service_type: v }))}
+                options={serviceTypes.map((s) => ({ value: s.id, label: s.name }))}
+                required
+              />
+              <SelectField
+                label="Priority"
+                value={ticketForm.priority}
+                onChange={(v) => setTicketForm((p) => ({ ...p, priority: v }))}
+                options={['low', 'medium', 'high']}
+              />
+              <div className="md:col-span-2">
+                <Field label="Subject" value={ticketForm.subject} onChange={(v) => setTicketForm((p) => ({ ...p, subject: v }))} />
+              </div>
+              <div className="md:col-span-2">
+                <label className="block">
+                  <span className="mb-1 block text-sm font-semibold text-slate-700">Message *</span>
+                  <textarea
+                    rows={5}
+                    value={ticketForm.message}
+                    onChange={(e) => setTicketForm((p) => ({ ...p, message: e.target.value }))}
+                    className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
+                  />
+                </label>
+              </div>
+            </div>
+
+            <div className="mt-4 flex justify-end gap-2">
+              <button type="button" onClick={() => setShowTicketModal(false)} className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-100">
+                Cancel
+              </button>
+              <button type="button" onClick={handleSubmitTicket} className="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-bold text-white hover:bg-indigo-700">
+                Submit Ticket
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default CustomerPortal;

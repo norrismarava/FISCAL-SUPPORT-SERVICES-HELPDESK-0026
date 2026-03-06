@@ -7,11 +7,13 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
 from django.db.models import Q
 from django.utils import timezone
+from django.utils.dateparse import parse_date
 from django.core.mail import send_mail
 from django.conf import settings
 import uuid
 
 from users.models import User, Notification
+from users.workitems import get_or_create_client_for_email, sync_ticket_work_item
 from helpdesk_backend.assignment import (
     select_available_technician_for_ticket,
     get_overloaded_technicians,
@@ -416,8 +418,25 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
     """
     permission_classes = (IsAuthenticated,)
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = ['status', 'priority', 'service_type', 'assigned_to']
-    search_fields = ['ticket_id', 'ticket_number', 'company_name', 'email', 'subject', 'message']
+    filterset_fields = {
+        'status': ['exact'],
+        'priority': ['exact'],
+        'service_type': ['exact'],
+        'assigned_to': ['exact'],
+        'created_at': ['date__gte', 'date__lte'],
+    }
+    search_fields = [
+        'ticket_id',
+        'ticket_number',
+        'company_name',
+        'email',
+        'subject',
+        'message',
+        'service_type__name',
+        'assigned_to__first_name',
+        'assigned_to__last_name',
+        'assigned_to__username',
+    ]
     ordering_fields = ['created_at', 'updated_at', 'priority']
     ordering = ['-created_at']
 
@@ -496,12 +515,47 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
         elif self.action in ['update', 'partial_update']:
             return TicketUpdateSerializer
         return SupportTicketDetailSerializer
+
+    def _apply_ticket_search(self, queryset, raw_search):
+        """
+        Tokenized search for ticket lists across id/reference, client details,
+        content, service type, and assigned technician names.
+        """
+        terms = [term for term in (raw_search or '').strip().split() if term]
+        if not terms:
+            return queryset
+
+        for term in terms:
+            queryset = queryset.filter(
+                Q(ticket_id__icontains=term)
+                | Q(ticket_number__icontains=term)
+                | Q(company_name__icontains=term)
+                | Q(email__icontains=term)
+                | Q(subject__icontains=term)
+                | Q(message__icontains=term)
+                | Q(service_type__name__icontains=term)
+                | Q(assigned_to__first_name__icontains=term)
+                | Q(assigned_to__last_name__icontains=term)
+                | Q(assigned_to__username__icontains=term)
+            )
+        return queryset.distinct()
     
     def perform_create(self, serializer):
         if self.request.user.role == 'technician':
             raise PermissionDenied('Technicians are not allowed to create new tickets.')
 
         ticket = serializer.save()
+        client = get_or_create_client_for_email(
+            email=ticket.email,
+            full_name=ticket.contact_person or ticket.company_name,
+            phone=ticket.phone,
+            address=ticket.address,
+            company_name=ticket.company_name,
+            user=ticket.user if getattr(ticket.user, 'role', None) == 'user' else None,
+        )
+        if client and ticket.client_id != client.id:
+            ticket.client = client
+            ticket.save(update_fields=['client', 'updated_at'])
         if ticket.assigned_to_id:
             clear_ticket_backlog(ticket)
         _update_sla_state(ticket)
@@ -549,6 +603,7 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
                 message=f'You have been assigned ticket {ticket_ref}.',
                 link=f'/tickets/{ticket.id}',
             )
+        sync_ticket_work_item(ticket)
 
     def perform_update(self, serializer):
         user = self.request.user
@@ -627,6 +682,7 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
                 actor=user,
                 trigger='ticket_status_transition',
             )
+        sync_ticket_work_item(ticket)
     
     @action(detail=False, methods=['get'])
     def client_history(self, request):
@@ -653,6 +709,35 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
     def my_tickets(self, request):
         """Get tickets assigned to current user (technician)"""
         tickets = SupportTicket.objects.filter(assigned_to=request.user)
+
+        status_param = (request.query_params.get('status') or '').strip().lower()
+        status_aliases = {
+            'resolved': 'solved',
+            'completed': 'solved',
+        }
+        status_param = status_aliases.get(status_param, status_param)
+        if status_param and status_param != 'all':
+            if status_param == 'unassigned':
+                tickets = tickets.filter(assigned_to__isnull=True)
+            else:
+                tickets = tickets.filter(status=status_param)
+
+        priority = (request.query_params.get('priority') or '').strip().lower()
+        if priority:
+            tickets = tickets.filter(priority=priority)
+
+        date_from = parse_date(request.query_params.get('created_at__date__gte', ''))
+        if date_from:
+            tickets = tickets.filter(created_at__date__gte=date_from)
+
+        date_to = parse_date(request.query_params.get('created_at__date__lte', ''))
+        if date_to:
+            tickets = tickets.filter(created_at__date__lte=date_to)
+
+        search = request.query_params.get('search')
+        tickets = self._apply_ticket_search(tickets, search)
+
+        tickets = tickets.order_by('-created_at')
         
         page = self.paginate_queryset(tickets)
         if page is not None:
@@ -665,15 +750,41 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def by_status(self, request):
         """Get tickets filtered by status"""
-        status_param = request.query_params.get('status', 'pending')
-        
+        status_param = (request.query_params.get('status') or 'pending').strip().lower()
+        status_aliases = {
+            'resolved': 'solved',
+            'completed': 'solved',
+        }
+        status_param = status_aliases.get(status_param, status_param)
+
         queryset = self.get_queryset()
-        
+
         if status_param == 'unassigned':
             tickets = queryset.filter(assigned_to__isnull=True)
         else:
             tickets = queryset.filter(status=status_param)
-        
+
+        assigned_to = request.query_params.get('assigned_to')
+        if assigned_to:
+            tickets = tickets.filter(assigned_to_id=assigned_to)
+
+        priority = request.query_params.get('priority')
+        if priority:
+            tickets = tickets.filter(priority=priority)
+
+        date_from = parse_date(request.query_params.get('created_at__date__gte', ''))
+        if date_from:
+            tickets = tickets.filter(created_at__date__gte=date_from)
+
+        date_to = parse_date(request.query_params.get('created_at__date__lte', ''))
+        if date_to:
+            tickets = tickets.filter(created_at__date__lte=date_to)
+
+        search = request.query_params.get('search')
+        tickets = self._apply_ticket_search(tickets, search)
+
+        tickets = tickets.order_by('-created_at')
+
         page = self.paginate_queryset(tickets)
         if page is not None:
             serializer = SupportTicketListSerializer(page, many=True)
@@ -778,6 +889,7 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
             ),
             link=f'/tickets/{ticket.id}',
         )
+        sync_ticket_work_item(ticket)
 
         serializer = SupportTicketDetailSerializer(ticket, context={'request': request})
         return Response(
@@ -830,7 +942,8 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
             raise PermissionDenied('Only the assigned technician can mark this ticket as solved.')
         ticket.status = 'solved'
         ticket.solved_at = timezone.now()
-        ticket.save()
+        ticket.resolved_by = request.user
+        ticket.save(update_fields=['status', 'solved_at', 'resolved_by', 'updated_at'])
         clear_ticket_backlog(ticket)
         _update_sla_state(ticket)
         _log_ticket_event(
@@ -865,6 +978,7 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
                 message='Your ticket has been marked as solved.',
                 link=f'/tickets/{ticket.id}',
             )
+        sync_ticket_work_item(ticket)
         
         serializer = SupportTicketDetailSerializer(ticket, context={'request': request})
         return Response(serializer.data)
@@ -1010,6 +1124,15 @@ class TicketCommentViewSet(viewsets.ModelViewSet):
             raise PermissionDenied('You are not allowed to comment on this ticket.')
         if self.request.user.role == 'manager':
             raise PermissionDenied('Managers have read-only access on tickets.')
+
+        # Allow client portal users to comment on their own tickets at any stage.
+        # Keep the legacy restriction for non-client roles only.
+        if (
+            self.request.user.role != 'user'
+            and ticket.user_id == self.request.user.id
+            and ticket.status != 'solved'
+        ):
+            raise PermissionDenied('Ticket creators can only comment after the ticket is solved.')
 
         if self.request.user.role == 'technician' and ticket.assigned_to_id != self.request.user.id:
             raise PermissionDenied('Technicians can only comment on tickets assigned to them.')

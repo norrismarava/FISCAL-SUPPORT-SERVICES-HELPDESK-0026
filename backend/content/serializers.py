@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from .models import (
     BlogCategory, BlogPost, FAQCategory, FAQ, 
-    Service, ServiceResource
+    Service, ServiceResource, Announcement
 )
 
 
@@ -100,3 +100,20 @@ class ServiceSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at'
         ]
         read_only_fields = ['slug', 'created_at', 'updated_at']
+
+
+class AnnouncementSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Announcement
+        fields = [
+            'id',
+            'title',
+            'message',
+            'type',
+            'priority',
+            'is_published',
+            'published_at',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = ['created_at', 'updated_at']

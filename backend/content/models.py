@@ -123,3 +123,32 @@ class ServiceResource(models.Model):
     
     class Meta:
         ordering = ['-created_at']
+
+
+class Announcement(models.Model):
+    """Portal announcements shown to clients."""
+    TYPE_CHOICES = [
+        ('maintenance', 'Maintenance'),
+        ('feature', 'Feature'),
+        ('support', 'Support'),
+        ('general', 'General'),
+    ]
+    PRIORITY_CHOICES = [
+        ('high', 'High'),
+        ('normal', 'Normal'),
+    ]
+
+    title = models.CharField(max_length=200)
+    message = models.TextField()
+    type = models.CharField(max_length=20, choices=TYPE_CHOICES, default='general')
+    priority = models.CharField(max_length=20, choices=PRIORITY_CHOICES, default='normal')
+    is_published = models.BooleanField(default=True)
+    published_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.title
+
+    class Meta:
+        ordering = ['-published_at', '-created_at']

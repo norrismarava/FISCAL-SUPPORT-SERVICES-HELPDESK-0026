@@ -6,6 +6,7 @@ router = DefaultRouter()
 router.register(r'users', views.UserViewSet, basename='user')
 router.register(r'departments', views.DepartmentViewSet, basename='department')
 router.register(r'notifications', views.NotificationViewSet, basename='notification')
+router.register(r'leave-requests', views.LeaveRequestViewSet, basename='leave-request')
 
 urlpatterns = [
     # PUBLIC endpoints - no authentication required

@@ -20,8 +20,18 @@ class EmailOrUsernameTokenObtainPairSerializer(TokenObtainPairSerializer):
         if identifier:
             if '@' in identifier:
                 matched_user = User.objects.filter(email__iexact=identifier).first()
+                # UX fallback: allow partial email/domain match when it resolves to one user.
+                if not matched_user:
+                    prefix_matches = list(User.objects.filter(email__istartswith=identifier)[:2])
+                    if len(prefix_matches) == 1:
+                        matched_user = prefix_matches[0]
             if not matched_user:
                 matched_user = User.objects.filter(username__iexact=identifier).first()
+            if not matched_user and '@' not in identifier:
+                # Optional fallback: allow local-part login (before @) if unique.
+                local_part_matches = list(User.objects.filter(email__istartswith=f'{identifier}@')[:2])
+                if len(local_part_matches) == 1:
+                    matched_user = local_part_matches[0]
             if matched_user:
                 attrs[self.username_field] = getattr(matched_user, self.username_field)
 

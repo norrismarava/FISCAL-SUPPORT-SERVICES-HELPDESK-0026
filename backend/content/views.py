@@ -7,12 +7,12 @@ from rest_framework.filters import SearchFilter, OrderingFilter
 
 from .models import (
     BlogCategory, BlogPost, FAQCategory, FAQ,
-    Service, ServiceResource
+    Service, ServiceResource, Announcement
 )
 from .serializers import (
     BlogCategorySerializer, BlogPostListSerializer, BlogPostDetailSerializer,
     FAQCategorySerializer, FAQSerializer,
-    ServiceSerializer, ServiceResourceSerializer
+    ServiceSerializer, ServiceResourceSerializer, AnnouncementSerializer
 )
 from .permissions import IsAdminUser
 
@@ -188,3 +188,45 @@ class ServiceResourceViewSet(viewsets.ModelViewSet):
             file_size=file.size,
             file_type=file.name.split('.')[-1].lower()
         )
+
+
+class AnnouncementViewSet(viewsets.ModelViewSet):
+    """Portal announcements management."""
+    serializer_class = AnnouncementSerializer
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    filterset_fields = ['type', 'priority', 'is_published']
+    search_fields = ['title', 'message']
+    ordering_fields = ['published_at', 'created_at', 'updated_at']
+    ordering = ['-published_at', '-created_at']
+
+    def get_queryset(self):
+        is_staff_role = (
+            self.request.user.is_authenticated and
+            self.request.user.role in ['admin', 'manager', 'accounts']
+        )
+        if is_staff_role:
+            return Announcement.objects.all()
+        return Announcement.objects.filter(is_published=True)
+
+    def get_permissions(self):
+        if self.action in ['list', 'retrieve']:
+            return [AllowAny()]
+        return [IsAuthenticated(), IsAdminUser()]
+
+    @action(detail=True, methods=['post'])
+    def publish(self, request, pk=None):
+        announcement = self.get_object()
+        from django.utils import timezone
+        announcement.is_published = True
+        announcement.published_at = timezone.now()
+        announcement.save(update_fields=['is_published', 'published_at', 'updated_at'])
+        serializer = self.get_serializer(announcement)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'])
+    def unpublish(self, request, pk=None):
+        announcement = self.get_object()
+        announcement.is_published = False
+        announcement.save(update_fields=['is_published', 'updated_at'])
+        serializer = self.get_serializer(announcement)
+        return Response(serializer.data)

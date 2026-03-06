@@ -9,6 +9,7 @@ router.register(r'blog/posts', views.BlogPostViewSet, basename='blog-post')
 router.register(r'faq/categories', views.FAQCategoryViewSet, basename='faq-category')
 router.register(r'faq', views.FAQViewSet, basename='faq')
 router.register(r'services', views.ServiceViewSet, basename='service')
+router.register(r'announcements', views.AnnouncementViewSet, basename='announcement')
 
 # Nested router for service resources
 service_router = routers.NestedDefaultRouter(router, r'services', lookup='service')

@@ -2,6 +2,7 @@ from datetime import timedelta
 from decimal import Decimal
 from io import StringIO
 import csv
+from io import BytesIO
 
 from django.conf import settings
 from django.db.models import Count, Sum, Q
@@ -327,6 +328,7 @@ def report_as_csv(payload, include_fields=None):
         'Customer Phone',
         'Customer Address',
         'Company Name',
+        'Fault Type',
         'Fault Description',
         'ZIMRA Reference',
         'Date Booked',
@@ -355,7 +357,8 @@ def report_as_csv(payload, include_fields=None):
             job.customer_email or '',
             job.customer_phone or '',
             job.customer_address or '',
-            '',
+            'N/A',
+            job.get_fault_type_display() if job.fault_type else 'N/A',
             job.fault_description or job.get_fault_type_display() or '',
             job.zimra_reference or '',
             job.booking_date or '',
@@ -438,3 +441,223 @@ def report_as_pdf(payload, include_fields=None):
         y -= 14
     c.save()
     return pdf_buffer.getvalue()
+
+
+def report_as_xlsx(payload, include_fields=None):
+    """
+    Build a styled Excel report with consistent column sizing and readable colors.
+    """
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+    except Exception as exc:
+        raise RuntimeError('XLSX export requires openpyxl. Install with `pip install openpyxl`.') from exc
+
+    include_fields = include_fields or []
+    include_all = not include_fields
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Main Monthly Report'
+
+    # Palette
+    dark_blue = PatternFill(fill_type='solid', fgColor='1F2A44')
+    teal = PatternFill(fill_type='solid', fgColor='0D9488')
+    light_header = PatternFill(fill_type='solid', fgColor='334155')
+    white_font = Font(color='FFFFFF', bold=True)
+    section_font = Font(color='FFFFFF', bold=True, size=12)
+    normal_font = Font(color='0F172A', size=10)
+    thin_border = Border(
+        left=Side(style='thin', color='94A3B8'),
+        right=Side(style='thin', color='94A3B8'),
+        top=Side(style='thin', color='94A3B8'),
+        bottom=Side(style='thin', color='94A3B8'),
+    )
+
+    current_row = 1
+
+    # Title block
+    ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=10)
+    title_cell = ws.cell(row=current_row, column=1, value='FSS HELP DESK - MAIN MONTHLY REPORT')
+    title_cell.fill = dark_blue
+    title_cell.font = Font(color='FFFFFF', bold=True, size=14)
+    title_cell.alignment = Alignment(horizontal='center', vertical='center')
+    current_row += 1
+
+    ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=10)
+    subtitle = f"Interval: {(payload.get('interval') or '').upper()} | Period: {payload.get('start')} to {payload.get('end')}"
+    subtitle_cell = ws.cell(row=current_row, column=1, value=subtitle)
+    subtitle_cell.fill = teal
+    subtitle_cell.font = white_font
+    subtitle_cell.alignment = Alignment(horizontal='center', vertical='center')
+    current_row += 2
+
+    # Summary section
+    ws.cell(row=current_row, column=1, value='SUMMARY').fill = dark_blue
+    ws.cell(row=current_row, column=1).font = section_font
+    ws.cell(row=current_row, column=1).alignment = Alignment(horizontal='left', vertical='center')
+    current_row += 1
+
+    summary_rows = [
+        ('Total Jobs Logged', payload.get('jobs_total', 0)),
+        ('Completed Jobs', payload.get('jobs_completed', 0)),
+        ('Total Tickets Logged', payload.get('tickets_total', 0)),
+        ('Estimated Revenue', payload.get('estimated_revenue', 0)),
+        ('Estimated Costs', payload.get('estimated_costs', 0)),
+        ('Total Discounts', payload.get('total_discount', 0)),
+        ('Pending Jobs', payload.get('pending_jobs', 0)),
+        ('Pending Tickets', payload.get('pending_tickets', 0)),
+        ('Escalated Tickets', payload.get('escalated_tickets', 0)),
+        ('Avg Job Resolution (Hours)', payload.get('avg_job_resolution_hours', 0)),
+        ('Avg Ticket Resolution (Hours)', payload.get('avg_ticket_resolution_hours', 0)),
+        ('Customer Satisfaction Avg', payload.get('customer_satisfaction_avg', 'N/A')),
+        ('Customer Satisfaction Responses', payload.get('customer_satisfaction_count', 0)),
+    ]
+    for metric, value in summary_rows:
+        ws.cell(row=current_row, column=1, value=metric)
+        ws.cell(row=current_row, column=2, value=value)
+        ws.cell(row=current_row, column=1).font = normal_font
+        ws.cell(row=current_row, column=2).font = normal_font
+        ws.cell(row=current_row, column=1).border = thin_border
+        ws.cell(row=current_row, column=2).border = thin_border
+        current_row += 1
+
+    current_row += 1
+
+    # Main jobs table
+    ws.cell(row=current_row, column=1, value='MAIN JOBS SHEET').fill = dark_blue
+    ws.cell(row=current_row, column=1).font = section_font
+    current_row += 1
+
+    headers = [
+        'Job ID',
+        'Job Card',
+        'Customer Name',
+        'Customer Email',
+        'Customer Phone',
+        'Customer Address',
+        'Company Name',
+        'Fault Type',
+        'Fault Description',
+        'ZIMRA Reference',
+        'Date Booked',
+        'Date Resolved',
+        'Time Start',
+        'Time Finish',
+        'Job Type',
+        'Status',
+        'Billed Hours',
+        'Amount Charged',
+        'Hourly Rate',
+        'Currency',
+        'Assigned Technician',
+        'Approved By',
+        'Engineer Comments',
+        'Booked By',
+        'Created At',
+        'Updated At',
+    ]
+
+    for col_idx, header in enumerate(headers, start=1):
+        cell = ws.cell(row=current_row, column=col_idx, value=header)
+        cell.fill = light_header
+        cell.font = white_font
+        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        cell.border = thin_border
+    current_row += 1
+
+    jobs_qs = CallLog.objects.filter(created_at__gte=payload.get('start'), created_at__lte=payload.get('end'))
+    jobs_qs, _ = _apply_report_filters(jobs_qs, SupportTicket.objects.none(), filters=payload.get('filters') or {})
+    jobs = (
+        jobs_qs
+        .select_related('assigned_technician', 'created_by')
+        .prefetch_related('engineer_comments')
+        .order_by('-created_at')
+    )
+
+    for job in jobs:
+        latest_comment = job.engineer_comments.last()
+        row_values = [
+            str(job.job_id) if job.job_id else 'N/A',
+            job.job_number or 'N/A',
+            job.customer_name or 'N/A',
+            job.customer_email or 'N/A',
+            job.customer_phone or 'N/A',
+            job.customer_address or 'N/A',
+            job.customer_name or 'N/A',
+            job.get_fault_type_display() if job.fault_type else 'N/A',
+            job.fault_description or job.get_fault_type_display() or 'N/A',
+            job.zimra_reference or 'N/A',
+            str(job.booking_date or 'N/A'),
+            str(job.resolution_date or 'N/A'),
+            str(job.time_start or 'N/A'),
+            str(job.time_finish or 'N/A'),
+            job.get_job_type_display() if job.job_type else 'N/A',
+            job.get_status_display() if job.status else 'N/A',
+            job.billed_hours or 'N/A',
+            float(job.amount_charged or 0),
+            float(_hourly_rate(job.amount_charged, job.billed_hours) or 0) if _hourly_rate(job.amount_charged, job.billed_hours) != '' else '',
+            job.currency or 'N/A',
+            job.assigned_technician.get_full_name() if job.assigned_technician else 'Unassigned',
+            '',
+            latest_comment.comment if latest_comment else (job.resolution_notes or 'N/A'),
+            job.created_by.get_full_name() if job.created_by else 'N/A',
+            str(job.created_at or ''),
+            str(job.updated_at or ''),
+        ]
+        for col_idx, value in enumerate(row_values, start=1):
+            cell = ws.cell(row=current_row, column=col_idx, value=value)
+            cell.font = normal_font
+            cell.alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
+            cell.border = thin_border
+        current_row += 1
+
+    # Keep columns and rows neat/consistent
+    uniform_width = 20
+    for col_idx in range(1, len(headers) + 1):
+        ws.column_dimensions[get_column_letter(col_idx)].width = uniform_width
+
+    for row_idx in range(1, current_row + 1):
+        ws.row_dimensions[row_idx].height = 22
+
+    # Optional extra sheets
+    if include_all or 'job_breakdown' in include_fields:
+        ws_jobs = wb.create_sheet('Job Breakdown')
+        ws_jobs.append(['Fault Type', 'Jobs Count', 'Revenue'])
+        for row in payload.get('job_breakdown', []):
+            ws_jobs.append([row.get('fault_type') or 'N/A', row.get('count') or 0, float(row.get('revenue') or 0)])
+        for c in range(1, 4):
+            head = ws_jobs.cell(row=1, column=c)
+            head.fill = light_header
+            head.font = white_font
+            head.border = thin_border
+            ws_jobs.column_dimensions[get_column_letter(c)].width = 24
+
+    if include_all or 'ticket_breakdown' in include_fields:
+        ws_tickets = wb.create_sheet('Ticket Breakdown')
+        ws_tickets.append(['Status', 'Tickets Count'])
+        for row in payload.get('ticket_breakdown', []):
+            ws_tickets.append([row.get('status') or 'N/A', row.get('count') or 0])
+        for c in range(1, 3):
+            head = ws_tickets.cell(row=1, column=c)
+            head.fill = light_header
+            head.font = white_font
+            head.border = thin_border
+            ws_tickets.column_dimensions[get_column_letter(c)].width = 24
+
+    if include_all or 'currency_breakdown' in include_fields:
+        ws_currency = wb.create_sheet('Revenue by Currency')
+        ws_currency.append(['Currency', 'Amount'])
+        for row in payload.get('currency_breakdown', []):
+            ws_currency.append([row.get('currency') or 'N/A', float(row.get('total') or 0)])
+        for c in range(1, 3):
+            head = ws_currency.cell(row=1, column=c)
+            head.fill = light_header
+            head.font = white_font
+            head.border = thin_border
+            ws_currency.column_dimensions[get_column_letter(c)].width = 24
+
+    stream = BytesIO()
+    wb.save(stream)
+    return stream.getvalue()

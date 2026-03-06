@@ -7,6 +7,9 @@ from rest_framework.decorators import action
 from django.http import HttpResponse
 from django.db.models import Count, Q, Sum
 from django.db.utils import OperationalError, ProgrammingError
+from django.db.models.functions import TruncDate
+from django.core.cache import cache
+from django.conf import settings
 from django.utils import timezone
 from datetime import timedelta
 from django.utils.text import slugify
@@ -20,7 +23,7 @@ from users.models import User
 from .models import ReportSchedule
 from .serializers import ReportScheduleSerializer
 from .permissions import IsReportAuthorized
-from .reporting import send_report, build_report_payload, report_as_csv, report_as_pdf
+from .reporting import send_report, build_report_payload, report_as_csv, report_as_pdf, report_as_xlsx
 from .tasks import send_report_now
 from helpdesk_backend.assignment import (
     get_active_load_threshold,
@@ -56,6 +59,10 @@ def dashboard_stats(request):
     """
     user = request.user
     period = request.query_params.get('period', 'week')
+    cache_key = f'dashboard_stats:v2:{user.id}:{user.role}:{period}'
+    cached_payload = cache.get(cache_key)
+    if cached_payload:
+        return Response(cached_payload)
     
     # Calculate date range based on period
     now = timezone.now()
@@ -107,9 +114,11 @@ def dashboard_stats(request):
         ticket_stats['my_tickets'] = tickets.filter(assigned_to=user).count()
     
     # ========== Priority Breakdown ==========
-    priority_breakdown = {}
-    for priority in ['low', 'medium', 'high', 'urgent']:
-        priority_breakdown[priority] = tickets.filter(priority=priority).count()
+    priority_breakdown = {key: 0 for key in ['low', 'medium', 'high', 'urgent']}
+    for row in tickets.values('priority').annotate(count=Count('id')):
+        key = row.get('priority')
+        if key in priority_breakdown:
+            priority_breakdown[key] = row.get('count', 0)
     
     # Urgent/high priority tickets
     urgent_tickets = tickets.filter(Q(priority='urgent') | Q(priority='high'))
@@ -125,15 +134,10 @@ def dashboard_stats(request):
     } for t in urgent_tickets[:5]]
     
     # ========== Service Type Distribution ==========
-    service_types = ServiceType.objects.filter(is_active=True)
-    service_type_dist = []
-    for st in service_types:
-        count = tickets.filter(service_type=st).count()
-        if count > 0:
-            service_type_dist.append({
-                'name': st.name,
-                'count': count
-            })
+    service_type_dist = [
+        {'name': row.get('service_type__name') or 'N/A', 'count': row.get('count', 0)}
+        for row in tickets.values('service_type__name').annotate(count=Count('id')).filter(count__gt=0)
+    ]
     
     # ========== Job Stats ==========
     job_stats = {
@@ -151,15 +155,31 @@ def dashboard_stats(request):
         job_stats['my_jobs'] = jobs.filter(assigned_technician=user).count()
     
     # ========== Fault Type Distribution ==========
-    fault_types = {}
-    for fault in ['license_tax_rate', 'tax_rate', 'inhouse_license', 'inhouse_license_reinstall', 'makute_license_reinstall', 'reinstallation', 'virtual_installation', 'support', 'smartmini_new_install', 'smartmini_license_renew', 'makute_license_renewal']:
-        fault_types[fault] = jobs.filter(fault_type=fault).count()
+    fault_keys = [
+        'license_tax_rate',
+        'tax_rate',
+        'inhouse_license',
+        'inhouse_license_reinstall',
+        'makute_license_reinstall',
+        'reinstallation',
+        'virtual_installation',
+        'support',
+        'smartmini_new_install',
+        'smartmini_license_renew',
+        'makute_license_renewal',
+    ]
+    fault_types = {key: 0 for key in fault_keys}
+    for row in jobs.values('fault_type').annotate(count=Count('id')):
+        key = row.get('fault_type')
+        if key in fault_types:
+            fault_types[key] = row.get('count', 0)
     
     # ========== Job Type Stats ==========
-    job_type_stats = {
-        'normal': jobs.filter(job_type='normal').count(),
-        'emergency': jobs.filter(job_type='emergency').count(),
-    }
+    job_type_stats = {'normal': 0, 'emergency': 0}
+    for row in jobs.values('job_type').annotate(count=Count('id')):
+        key = row.get('job_type')
+        if key in job_type_stats:
+            job_type_stats[key] = row.get('count', 0)
     
     # Emergency jobs
     emergency_jobs = jobs.filter(job_type='emergency')
@@ -193,23 +213,40 @@ def dashboard_stats(request):
     technician_performance = []
     if user.role == 'admin':
         technicians = User.objects.filter(role='technician', is_active=True)
+        ticket_counts = {
+            row['assigned_to']: row
+            for row in all_tickets.values('assigned_to').annotate(
+                total=Count('id'),
+                solved=Count('id', filter=Q(status='solved')),
+            )
+        }
+        job_counts = {
+            row['assigned_technician']: row
+            for row in all_jobs.values('assigned_technician').annotate(
+                total=Count('id'),
+                completed=Count('id', filter=Q(status='complete')),
+                pending=Count('id', filter=Q(status__in=['pending', 'assigned', 'in_progress'])),
+            )
+        }
         for tech in technicians:
-            tech_tickets = all_tickets.filter(assigned_to=tech)
-            tech_jobs = all_jobs.filter(assigned_technician=tech)
-            
-            completed_jobs_count = tech_jobs.filter(status='complete').count()
-            pending_jobs_count = tech_jobs.filter(status__in=['pending', 'assigned', 'in_progress']).count()
+            tech_ticket_summary = ticket_counts.get(tech.id, {})
+            tech_job_summary = job_counts.get(tech.id, {})
+            tickets_assigned = int(tech_ticket_summary.get('total') or 0)
+            tickets_solved = int(tech_ticket_summary.get('solved') or 0)
+            jobs_assigned = int(tech_job_summary.get('total') or 0)
+            completed_jobs_count = int(tech_job_summary.get('completed') or 0)
+            pending_jobs_count = int(tech_job_summary.get('pending') or 0)
             
             technician_performance.append({
                 'id': tech.id,
                 'name': tech.get_full_name() or tech.username,
                 'avatar': tech.avatar.url if hasattr(tech, 'avatar') and tech.avatar else None,
-                'tickets_assigned': tech_tickets.count(),
-                'tickets_solved': tech_tickets.filter(status='solved').count(),
-                'jobs_assigned': tech_jobs.count(),
+                'tickets_assigned': tickets_assigned,
+                'tickets_solved': tickets_solved,
+                'jobs_assigned': jobs_assigned,
                 'jobs_completed': completed_jobs_count,
                 'jobs_pending': pending_jobs_count,
-                'completion_rate': round((completed_jobs_count / tech_jobs.count() * 100) if tech_jobs.count() > 0 else 0, 1)
+                'completion_rate': round((completed_jobs_count / jobs_assigned * 100) if jobs_assigned > 0 else 0, 1)
             })
 
     # ========== Manager/Admin Operations Data ==========
@@ -389,8 +426,8 @@ def dashboard_stats(request):
             }
     
     # ========== Recent Activity ==========
-    recent_tickets = tickets.order_by('-created_at')[:10]
-    recent_jobs = jobs.order_by('-created_at')[:10]
+    recent_tickets = tickets.select_related('service_type', 'assigned_to').order_by('-created_at')[:10]
+    recent_jobs = jobs.select_related('assigned_technician').order_by('-created_at')[:10]
     
     # ========== Upcoming Bookings ==========
     upcoming_bookings = jobs.filter(
@@ -410,33 +447,36 @@ def dashboard_stats(request):
     } for j in upcoming_bookings]
     
     # ========== Time Analytics (Last 7 days) ==========
-    time_analytics = {
-        'tickets_by_day': [],
-        'jobs_by_day': [],
+    time_analytics = {'tickets_by_day': [], 'jobs_by_day': []}
+    analytics_start = (now - timedelta(days=6)).replace(hour=0, minute=0, second=0, microsecond=0)
+    ticket_by_day_map = {
+        row['day'].strftime('%Y-%m-%d'): row['count']
+        for row in all_tickets.filter(created_at__gte=analytics_start)
+        .annotate(day=TruncDate('created_at'))
+        .values('day')
+        .annotate(count=Count('id'))
     }
-    
-    for i in range(7):
+    job_by_day_map = {
+        row['day'].strftime('%Y-%m-%d'): row['count']
+        for row in all_jobs.filter(created_at__gte=analytics_start)
+        .annotate(day=TruncDate('created_at'))
+        .values('day')
+        .annotate(count=Count('id'))
+    }
+    for i in range(6, -1, -1):
         day = now - timedelta(days=i)
-        day_start = day.replace(hour=0, minute=0, second=0, microsecond=0)
-        day_end = day.replace(hour=23, minute=59, second=59, microsecond=999999)
-        
-        ticket_count = all_tickets.filter(created_at__gte=day_start, created_at__lte=day_end).count()
-        job_count = all_jobs.filter(created_at__gte=day_start, created_at__lte=day_end).count()
-        
+        day_key = day.strftime('%Y-%m-%d')
+        day_label = day.strftime('%a')
         time_analytics['tickets_by_day'].append({
-            'date': day_start.strftime('%Y-%m-%d'),
-            'label': day.strftime('%a'),
-            'count': ticket_count
+            'date': day_key,
+            'label': day_label,
+            'count': int(ticket_by_day_map.get(day_key, 0)),
         })
         time_analytics['jobs_by_day'].append({
-            'date': day_start.strftime('%Y-%m-%d'),
-            'label': day.strftime('%a'),
-            'count': job_count
+            'date': day_key,
+            'label': day_label,
+            'count': int(job_by_day_map.get(day_key, 0)),
         })
-    
-    # Reverse to show oldest first
-    time_analytics['tickets_by_day'].reverse()
-    time_analytics['jobs_by_day'].reverse()
     
     # ========== Activity Timeline ==========
     activity_timeline = []
@@ -471,7 +511,7 @@ def dashboard_stats(request):
     activity_timeline.sort(key=lambda x: x['timestamp'], reverse=True)
     activity_timeline = activity_timeline[:10]
     
-    return Response({
+    payload = {
         'ticket_stats': ticket_stats,
         'priority_breakdown': priority_breakdown,
         'service_type_dist': service_type_dist,
@@ -514,7 +554,9 @@ def dashboard_stats(request):
         'technician_capacity': technician_capacity,
         'reassignment_queue': reassignment_queue,
         'capacity_thresholds': capacity_thresholds,
-    })
+    }
+    cache.set(cache_key, payload, timeout=45)
+    return Response(payload)
 
 
 @api_view(['GET'])
@@ -536,6 +578,7 @@ def global_search(request):
     # Search tickets
     if user.role in ['admin', 'manager', 'technician']:
         tickets = SupportTicket.objects.filter(
+            Q(ticket_number__icontains=query) |
             Q(ticket_id__icontains=query) |
             Q(company_name__icontains=query) |
             Q(email__icontains=query) |
@@ -544,6 +587,7 @@ def global_search(request):
         
         results['tickets'] = [{
             'id': t.id,
+            'ticket_number': t.ticket_number,
             'ticket_id': str(t.ticket_id),
             'company_name': t.company_name,
             'status': t.status,
@@ -667,6 +711,10 @@ def export_report(request):
             content = report_as_pdf(payload, include_fields=include_fields)
             content_type = 'application/pdf'
             extension = 'pdf'
+        elif export_format in ['xlsx', 'excel']:
+            content = report_as_xlsx(payload, include_fields=include_fields)
+            content_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            extension = 'xlsx'
         else:
             content = report_as_csv(payload, include_fields=include_fields)
             content_type = 'text/csv'
@@ -679,7 +727,10 @@ def export_report(request):
         )
 
     timestamp = timezone.now().strftime('%Y%m%d_%H%M%S')
-    filename = f"fss_report_{slugify(interval)}_{timestamp}.{extension}"
+    if export_format in ['xlsx', 'excel'] and interval == 'monthly':
+        filename = f"fss_main_monthly_report_{timestamp}.{extension}"
+    else:
+        filename = f"fss_report_{slugify(interval)}_{timestamp}.{extension}"
 
     response = HttpResponse(content, content_type=content_type)
     response['Content-Disposition'] = f'attachment; filename="{filename}"'
@@ -693,7 +744,7 @@ def create_secure_report_link(request):
     include_fields = request.data.get('include_fields') or []
     filters = request.data.get('filters') or {}
     export_format = (request.data.get('format', 'csv') or 'csv').lower()
-    if export_format not in ['csv', 'pdf']:
+    if export_format not in ['csv', 'pdf', 'xlsx', 'excel']:
         export_format = 'csv'
 
     token_payload = {
@@ -739,6 +790,10 @@ def public_export_report(request):
             content = report_as_pdf(payload, include_fields=include_fields)
             content_type = 'application/pdf'
             extension = 'pdf'
+        elif export_format in ['xlsx', 'excel']:
+            content = report_as_xlsx(payload, include_fields=include_fields)
+            content_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            extension = 'xlsx'
         else:
             content = report_as_csv(payload, include_fields=include_fields)
             content_type = 'text/csv'
@@ -748,7 +803,10 @@ def public_export_report(request):
         return Response({'error': f'Failed to export report: {str(exc)}'}, status=500)
 
     timestamp = timezone.now().strftime('%Y%m%d_%H%M%S')
-    filename = f"fss_report_{slugify(interval)}_{timestamp}.{extension}"
+    if export_format in ['xlsx', 'excel'] and interval == 'monthly':
+        filename = f"fss_main_monthly_report_{timestamp}.{extension}"
+    else:
+        filename = f"fss_report_{slugify(interval)}_{timestamp}.{extension}"
     response = HttpResponse(content, content_type=content_type)
     response['Content-Disposition'] = f'attachment; filename="{filename}"'
     return response

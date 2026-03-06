@@ -1,7 +1,7 @@
 # users/admin.py
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
-from .models import User, Department, ClientProfile, Notification
+from .models import User, Department, ClientProfile, LeaveRequest, Notification
 
 
 @admin.register(User)
@@ -39,3 +39,19 @@ class NotificationAdmin(admin.ModelAdmin):
     list_filter = ['category', 'is_read', 'created_at']
     search_fields = ['recipient__email', 'recipient__username', 'title', 'message']
     readonly_fields = ['created_at', 'read_at']
+
+
+@admin.register(LeaveRequest)
+class LeaveRequestAdmin(admin.ModelAdmin):
+    list_display = [
+        'requester',
+        'leave_type',
+        'start_date',
+        'end_date',
+        'status',
+        'reviewed_by',
+        'created_at',
+    ]
+    list_filter = ['status', 'leave_type', 'start_date', 'created_at']
+    search_fields = ['requester__email', 'requester__username', 'reason', 'manager_notes']
+    readonly_fields = ['created_at', 'updated_at', 'reviewed_at']

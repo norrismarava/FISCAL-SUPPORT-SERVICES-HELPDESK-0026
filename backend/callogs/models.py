@@ -1,6 +1,7 @@
 from django.db import models
 from django.conf import settings
 import uuid
+import re
 
 class CallLog(models.Model):
     """
@@ -57,6 +58,13 @@ class CallLog(models.Model):
     customer_email = models.EmailField()
     customer_phone = models.CharField(max_length=20)
     customer_address = models.TextField(blank=True)
+    client = models.ForeignKey(
+        'users.Client',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='job_cards'
+    )
     
     # Related ticket (if created from ticket)
     related_ticket = models.ForeignKey(
@@ -80,6 +88,16 @@ class CallLog(models.Model):
     currency = models.CharField(max_length=3, choices=CURRENCY_CHOICES, default='USD')
     zimra_reference = models.CharField(max_length=100, blank=True)  # Tax reference
     invoice_number = models.CharField(max_length=100, blank=True)
+    invoice_sent_at = models.DateTimeField(null=True, blank=True)
+    invoice_sent_note = models.TextField(blank=True)
+    invoice_sent_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='invoice_notifications_sent',
+        limit_choices_to={'role__in': ['accounts', 'admin']},
+    )
     payment_terms_type = models.CharField(max_length=20, choices=PAYMENT_TERMS_CHOICES, default='none')
     discount_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     special_terms_notes = models.TextField(blank=True)
@@ -91,6 +109,14 @@ class CallLog(models.Model):
         null=True,
         blank=True,
         related_name='assigned_jobs',
+        limit_choices_to={'role__in': ['technician', 'manager', 'admin']}
+    )
+    resolved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='resolved_jobs',
         limit_choices_to={'role__in': ['technician', 'manager', 'admin']}
     )
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
@@ -127,10 +153,27 @@ class CallLog(models.Model):
     def save(self, *args, **kwargs):
         # Auto-generate job number if not set
         if not self.job_number:
-            from django.utils import timezone
-            date_str = timezone.now().strftime('%Y%m%d')
-            count = CallLog.objects.filter(job_number__startswith=f'JOB-{date_str}').count()
-            self.job_number = f'JOB-{date_str}-{count + 1:04d}'
+            prefix = 'FSSCALLLOGS'
+            max_seq = 0
+
+            # Pull only existing records that already use the new prefixed format.
+            existing_numbers = CallLog.objects.filter(
+                job_number__startswith=prefix
+            ).values_list('job_number', flat=True)
+
+            for number in existing_numbers:
+                match = re.match(rf'^{prefix}(\d+)$', str(number or ''))
+                if match:
+                    max_seq = max(max_seq, int(match.group(1)))
+
+            # Generate next available code, guarding against rare race/collision.
+            next_seq = max_seq + 1
+            candidate = f'{prefix}{next_seq:04d}'
+            while CallLog.objects.filter(job_number=candidate).exists():
+                next_seq += 1
+                candidate = f'{prefix}{next_seq:04d}'
+
+            self.job_number = candidate
         super().save(*args, **kwargs)
     
     class Meta:
@@ -180,4 +223,38 @@ class CallLogActivity(models.Model):
     class Meta:
         verbose_name_plural = 'Call Log Activities'
         ordering = ['-created_at']
+
+
+class JobBacklogEntry(models.Model):
+    """
+    Waiting queue entry for jobs that could not be assigned due to workload thresholds.
+    One active backlog record is maintained per job.
+    """
+    call_log = models.OneToOneField(
+        CallLog,
+        on_delete=models.CASCADE,
+        related_name='backlog_entry'
+    )
+    reason = models.CharField(max_length=100, blank=True, default='threshold_full')
+    is_waiting = models.BooleanField(default=True)
+    enqueued_at = models.DateTimeField(auto_now_add=True)
+    dequeued_at = models.DateTimeField(null=True, blank=True)
+    dequeued_to = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='dequeued_backlog_jobs',
+        limit_choices_to={'role__in': ['technician', 'manager', 'admin']},
+    )
+
+    class Meta:
+        ordering = ['enqueued_at', 'id']
+        indexes = [
+            models.Index(fields=['is_waiting', 'enqueued_at']),
+        ]
+
+    def __str__(self):
+        status = 'waiting' if self.is_waiting else 'dequeued'
+        return f'JobBacklog<{self.call_log.job_number}> {status}'
 

@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from django.contrib.auth.password_validation import validate_password
 from django.utils import timezone
-from .models import User, Department, ClientProfile, Notification
+from .models import User, Department, ClientProfile, Client, LeaveRequest, Notification
 
 
 class DepartmentSerializer(serializers.ModelSerializer):
@@ -63,6 +63,22 @@ class ClientProfileSerializer(serializers.ModelSerializer):
         ]
 
 
+class ClientDirectorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Client
+        fields = [
+            'id',
+            'full_name',
+            'email',
+            'phone',
+            'address',
+            'company_name',
+            'is_active',
+            'created_at',
+            'updated_at',
+        ]
+
+
 class NotificationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Notification
@@ -77,6 +93,60 @@ class NotificationSerializer(serializers.ModelSerializer):
             'created_at',
         ]
         read_only_fields = ['id', 'title', 'message', 'category', 'link', 'created_at', 'read_at']
+
+
+class LeaveRequestSerializer(serializers.ModelSerializer):
+    requester_name = serializers.CharField(source='requester.get_full_name', read_only=True)
+    requester_email = serializers.EmailField(source='requester.email', read_only=True)
+    reviewed_by_name = serializers.CharField(source='reviewed_by.get_full_name', read_only=True)
+    total_days = serializers.SerializerMethodField()
+
+    class Meta:
+        model = LeaveRequest
+        fields = [
+            'id',
+            'requester',
+            'requester_name',
+            'requester_email',
+            'leave_type',
+            'start_date',
+            'end_date',
+            'total_days',
+            'reason',
+            'contact_phone',
+            'handover_notes',
+            'status',
+            'manager_notes',
+            'reviewed_by',
+            'reviewed_by_name',
+            'reviewed_at',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = [
+            'id',
+            'requester',
+            'requester_name',
+            'requester_email',
+            'total_days',
+            'reviewed_by',
+            'reviewed_by_name',
+            'reviewed_at',
+            'created_at',
+            'updated_at',
+        ]
+
+    def get_total_days(self, obj):
+        if not obj.start_date or not obj.end_date:
+            return 0
+        return (obj.end_date - obj.start_date).days + 1
+
+    def validate(self, attrs):
+        start_date = attrs.get('start_date', getattr(self.instance, 'start_date', None))
+        end_date = attrs.get('end_date', getattr(self.instance, 'end_date', None))
+        if start_date and end_date and end_date < start_date:
+            raise serializers.ValidationError({'end_date': 'End date cannot be before start date.'})
+        return attrs
 
 
 class RegisterSerializer(serializers.ModelSerializer):

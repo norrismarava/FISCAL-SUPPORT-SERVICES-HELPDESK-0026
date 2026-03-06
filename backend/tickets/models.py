@@ -45,6 +45,7 @@ class SupportTicket(models.Model):
     email = models.EmailField()
     phone = models.CharField(max_length=20, blank=True)
     contact_person = models.CharField(max_length=255, blank=True)
+    address = models.TextField(blank=True)
     
     # If submitted by authenticated user
     user = models.ForeignKey(
@@ -53,6 +54,13 @@ class SupportTicket(models.Model):
         null=True,
         blank=True,
         related_name='submitted_tickets'
+    )
+    client = models.ForeignKey(
+        'users.Client',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='tickets'
     )
     
     # Ticket details
@@ -79,6 +87,14 @@ class SupportTicket(models.Model):
         blank=True,
         related_name='merged_children'
     )
+    resolved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='resolved_tickets',
+        limit_choices_to={'role__in': ['technician', 'manager', 'admin']}
+    )
     
     # Public submission tracking
     ip_address = models.GenericIPAddressField(null=True, blank=True)
@@ -104,7 +120,7 @@ class SupportTicket(models.Model):
         super().save(*args, **kwargs)
         # Generate human-friendly reference after first save when PK exists.
         if (creating or not self.ticket_number) and self.pk and not self.ticket_number:
-            self.ticket_number = f'FSS{self.pk}'
+            self.ticket_number = f'FSS-{self.pk:06d}'
             super().save(update_fields=['ticket_number'])
     
     def reopen(self):

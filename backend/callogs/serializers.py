@@ -32,9 +32,12 @@ class CallLogListSerializer(serializers.ModelSerializer):
         read_only=True
     )
     created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
+    created_by_role = serializers.CharField(source='created_by.role', read_only=True)
     fault_type_display = serializers.CharField(source='get_fault_type_display', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     balance_due = serializers.SerializerMethodField()
+    invoice_sent_by_name = serializers.CharField(source='invoice_sent_by.get_full_name', read_only=True)
+    technicians_helped = serializers.SerializerMethodField()
     
     class Meta:
         model = CallLog
@@ -44,15 +47,37 @@ class CallLogListSerializer(serializers.ModelSerializer):
             'status', 'status_display', 'full_amount', 'amount_deposited', 'balance_due',
             'amount_charged', 'currency',
             'payment_terms_type', 'discount_amount',
+            'invoice_sent_at', 'invoice_sent_by', 'invoice_sent_by_name',
             'time_start', 'time_finish', 'billed_hours', 'resolution_date', 'resolution_time',
             'assigned_technician', 'assigned_technician_name',
-            'created_by', 'created_by_name',
+            'technicians_helped',
+            'created_by', 'created_by_name', 'created_by_role',
             'booking_date', 'created_at', 'updated_at'
         ]
         read_only_fields = ['job_id', 'job_number', 'created_at', 'updated_at']
 
     def get_balance_due(self, obj):
         return float(obj.balance_due or 0)
+
+    def get_technicians_helped(self, obj):
+        helped = []
+        seen = set()
+
+        if obj.assigned_technician and obj.assigned_technician.role in ['technician', 'manager', 'admin']:
+            name = obj.assigned_technician.get_full_name() or obj.assigned_technician.username
+            if name and name not in seen:
+                seen.add(name)
+                helped.append(name)
+
+        for entry in obj.engineer_comments.select_related('engineer').all():
+            engineer = entry.engineer
+            if engineer and engineer.role in ['technician', 'manager', 'admin']:
+                name = engineer.get_full_name() or engineer.username
+                if name and name not in seen:
+                    seen.add(name)
+                    helped.append(name)
+
+        return helped
 
 
 class CallLogDetailSerializer(serializers.ModelSerializer):
@@ -63,6 +88,7 @@ class CallLogDetailSerializer(serializers.ModelSerializer):
     activities = CallLogActivitySerializer(many=True, read_only=True)
     related_ticket_id = serializers.UUIDField(source='related_ticket.ticket_id', read_only=True)
     balance_due = serializers.SerializerMethodField()
+    invoice_sent_by_name = serializers.CharField(source='invoice_sent_by.get_full_name', read_only=True)
     
     class Meta:
         model = CallLog
@@ -73,6 +99,7 @@ class CallLogDetailSerializer(serializers.ModelSerializer):
             'job_type', 'fault_type', 'fault_description', 'resolution_notes',
             'full_amount', 'amount_deposited', 'balance_due',
             'amount_charged', 'currency', 'zimra_reference', 'invoice_number',
+            'invoice_sent_at', 'invoice_sent_note', 'invoice_sent_by', 'invoice_sent_by_name',
             'payment_terms_type', 'discount_amount', 'special_terms_notes',
             'assigned_technician', 'assigned_technician_details',
             'status', 'booking_date', 'booking_time',
@@ -98,6 +125,7 @@ class CallLogCreateSerializer(serializers.ModelSerializer):
         model = CallLog
         fields = [
             'id', 'job_number', 'status',
+            'client',
             'customer_name', 'customer_email', 'customer_phone', 'customer_address',
             'related_ticket', 'job_type', 'fault_type', 'fault_description',
             'full_amount', 'amount_deposited',
@@ -153,6 +181,17 @@ class CallLogCreateSerializer(serializers.ModelSerializer):
         return attrs
     
     def create(self, validated_data):
+        client = validated_data.get('client')
+        if client:
+            if not validated_data.get('customer_name'):
+                validated_data['customer_name'] = client.company_name or client.full_name or ''
+            if not validated_data.get('customer_email'):
+                validated_data['customer_email'] = client.email
+            if not validated_data.get('customer_phone'):
+                validated_data['customer_phone'] = client.phone or ''
+            if not validated_data.get('customer_address'):
+                validated_data['customer_address'] = client.address or ''
+
         user = self.context['request'].user
         validated_data['created_by'] = user
         validated_data['status'] = 'pending'

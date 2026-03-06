@@ -90,13 +90,15 @@ class SupportTicketListSerializer(serializers.ModelSerializer):
     assigned_to_name = serializers.CharField(source='assigned_to.get_full_name', read_only=True)
     comments_count = serializers.IntegerField(source='comments.count', read_only=True)
     sla_remaining_seconds = serializers.SerializerMethodField()
+    created_by_role = serializers.CharField(source='user.role', read_only=True)
     
     class Meta:
         model = SupportTicket
         fields = [
-            'id', 'ticket_id', 'ticket_number', 'company_name', 'email', 'subject',
+            'id', 'ticket_id', 'ticket_number', 'company_name', 'email', 'phone', 'address', 'subject',
             'service_type', 'service_type_name', 'status', 'priority',
             'assigned_to', 'assigned_to_name', 'is_public_submission',
+            'created_by_role',
             'comments_count', 'region', 'sla_due_at', 'sla_breached_at', 'sla_remaining_seconds',
             'merged_into', 'created_at', 'updated_at'
         ]
@@ -123,7 +125,7 @@ class SupportTicketDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = SupportTicket
         fields = [
-            'id', 'ticket_id', 'ticket_number', 'company_name', 'email', 'phone', 
+            'id', 'ticket_id', 'ticket_number', 'company_name', 'email', 'phone', 'address',
             'contact_person', 'user', 'user_details',
             'service_type', 'service_type_details', 'subject', 'message',
             'assigned_to', 'assigned_to_details', 'status', 'priority',
@@ -224,7 +226,7 @@ class PublicTicketSubmissionSerializer(serializers.ModelSerializer):
     class Meta:
         model = SupportTicket
         fields = [
-            'ticket_id', 'ticket_number', 'company_name', 'email', 'phone', 'contact_person',
+            'ticket_id', 'ticket_number', 'company_name', 'email', 'phone', 'contact_person', 'address',
             'service_type', 'region', 'subject', 'message', 'recaptcha_token'
         ]
         read_only_fields = ['ticket_id', 'ticket_number']
@@ -280,6 +282,7 @@ class PublicTicketStatusSerializer(serializers.ModelSerializer):
             'ticket_number',
             'company_name',
             'email',
+            'address',
             'subject',
             'status',
             'priority',
@@ -374,7 +377,8 @@ class AuthenticatedTicketCreateSerializer(serializers.ModelSerializer):
         model = SupportTicket
         fields = [
             'id', 'ticket_id', 'ticket_number', 'status', 'assigned_to', 'assigned_to_name',
-            'company_name', 'email', 'phone', 'contact_person',
+            'client',
+            'company_name', 'email', 'phone', 'contact_person', 'address',
             'service_type', 'region', 'subject', 'message', 'priority'
         ]
         read_only_fields = ['id', 'ticket_id', 'ticket_number', 'status', 'assigned_to', 'assigned_to_name']
@@ -418,6 +422,19 @@ class AuthenticatedTicketCreateSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         """Create ticket from authenticated user"""
         user = self.context['request'].user
+        client = validated_data.get('client')
+
+        if client:
+            if not validated_data.get('company_name'):
+                validated_data['company_name'] = client.company_name or client.full_name or ''
+            if not validated_data.get('email'):
+                validated_data['email'] = client.email
+            if not validated_data.get('phone'):
+                validated_data['phone'] = client.phone or ''
+            if not validated_data.get('contact_person'):
+                validated_data['contact_person'] = client.full_name or ''
+            if not validated_data.get('address'):
+                validated_data['address'] = client.address or ''
         
         validated_data['user'] = user
         validated_data['is_public_submission'] = False
@@ -438,7 +455,7 @@ class TicketUpdateSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = SupportTicket
-        fields = ['status', 'priority', 'assigned_to', 'subject', 'message', 'region']
+        fields = ['status', 'priority', 'assigned_to', 'subject', 'message', 'region', 'address']
     
     def update(self, instance, validated_data):
         # Track status change
